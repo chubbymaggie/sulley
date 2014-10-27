@@ -116,9 +116,9 @@ class session (pgraph.graph):
                   session_filename=None,
                   skip=0,
                   sleep_time=1.0,
-                  log_level=30,
+                  log_level=logging.INFO,
                   logfile=None,
-                  logfile_level=10,
+                  logfile_level=logging.DEBUG,
                   proto="tcp",
                   bind=None,
                   restart_interval=0,
@@ -137,11 +137,11 @@ class session (pgraph.graph):
         @type  sleep_time:         Float
         @kwarg sleep_time:         (Optional, def=1.0) Time to sleep in between tests
         @type  log_level:          Integer
-        @kwarg log_level:          (Optional, def=30) Set the log level (CRITICAL : 50 / ERROR : 40 / WARNING : 30 / INFO : 20 / DEBUG : 10)
+        @kwarg log_level:          (Optional, def=logger.INFO) Set the log level
         @type  logfile:            String
         @kwarg logfile:            (Optional, def=None) Name of log file
         @type  logfile_level:      Integer
-        @kwarg logfile_level:      (Optional, def=10) Log level for log file, default is debug
+        @kwarg logfile_level:      (Optional, def=logger.INFO) Set the log level for the logfile
         @type  proto:              String
         @kwarg proto:              (Optional, def="tcp") Communication protocol ("tcp", "udp", "ssl")
         @type  bind:               Tuple (host, port)
@@ -154,7 +154,9 @@ class session (pgraph.graph):
         @kwarg crash_threshold     (Optional, def=3) Maximum number of crashes allowed before a node is exhaust
         @type  restart_sleep_time: Integer
         @kwarg restart_sleep_time: Optional, def=300) Time in seconds to sleep when target can't be restarted
-        '''
+        @type  web_port:	   Integer
+        @kwarg web_port:           (Optional, def=26000) Port for monitoring fuzzing campaign via a web browser	
+	'''
 
         # run the parent classes initialization routine first.
         pgraph.graph.__init__(self)
@@ -173,7 +175,7 @@ class session (pgraph.graph):
 
         # Initialize logger
         self.logger = logging.getLogger("Sulley_logger")
-        self.logger.setLevel(logging.DEBUG)
+        self.logger.setLevel(log_level)
         formatter = logging.Formatter('[%(asctime)s] [%(levelname)s] -> %(message)s')
 
         if logfile != None:
@@ -208,7 +210,7 @@ class session (pgraph.graph):
             self.proto = socket.SOCK_DGRAM
 
         else:
-            raise sex.error("INVALID PROTOCOL SPECIFIED: %s" % self.proto)
+            raise sex.SullyRuntimeError("INVALID PROTOCOL SPECIFIED: %s" % self.proto)
 
         # import settings if they exist.
         self.import_file()
@@ -371,17 +373,17 @@ class session (pgraph.graph):
         if not this_node:
             # we can't fuzz if we don't have at least one target and one request.
             if not self.targets:
-                raise sex.error("NO TARGETS SPECIFIED IN SESSION")
+                raise sex.SullyRuntimeError("NO TARGETS SPECIFIED IN SESSION")
 
             if not self.edges_from(self.root.id):
-                raise sex.error("NO REQUESTS SPECIFIED IN SESSION")
+                raise sex.SullyRuntimeError("NO REQUESTS SPECIFIED IN SESSION")
 
             this_node = self.root
 
             try:    self.server_init()
             except: return
 
-        # XXX - TODO - complete parallel fuzzing, will likely have to thread out each target
+        # TODO: complete parallel fuzzing, will likely have to thread out each target
         target = self.targets[0]
 
         # step through every edge from the current node.
@@ -398,8 +400,8 @@ class session (pgraph.graph):
             current_path  = " -> ".join([self.nodes[e.src].name for e in path[1:]])
             current_path += " -> %s" % self.fuzz_node.name
 
-            self.logger.error("current fuzz path: %s" % current_path)
-            self.logger.error("fuzzed %d of %d total cases" % (self.total_mutant_index, self.total_num_mutations))
+            self.logger.info("current fuzz path: %s" % current_path)
+            self.logger.info("fuzzed %d of %d total cases" % (self.total_mutant_index, self.total_num_mutations))
 
             done_with_fuzz_node = False
             crash_count         = 0
@@ -437,7 +439,7 @@ class session (pgraph.graph):
 
                 # if we don't need to skip the current test case.
                 if self.total_mutant_index > self.skip:
-                    self.logger.error("fuzzing %d of %d" % (self.fuzz_node.mutant_index, num_mutations))
+                    self.logger.info("fuzzing %d of %d" % (self.fuzz_node.mutant_index, num_mutations))
 
                     # attempt to complete a fuzz transmission. keep trying until we are successful, whenever a failure
                     # occurs, restart the target.
@@ -527,7 +529,7 @@ class session (pgraph.graph):
                     sock.close()
 
                     # delay in between test cases.
-                    self.logger.warning("sleeping for %f seconds" % self.sleep_time)
+                    self.logger.info("sleeping for %f seconds" % self.sleep_time)
                     time.sleep(self.sleep_time)
 
                     # poll the PED-RPC endpoints (netmon, procmon etc...) for the target.
@@ -660,26 +662,28 @@ class session (pgraph.graph):
         # kill the pcap thread and see how many bytes the sniffer recorded.
         if target.netmon:
             bytes = target.netmon.post_send()
-            self.logger.error("netmon captured %d bytes for test case #%d" % (bytes, self.total_mutant_index))
+            self.logger.info("netmon captured %d bytes for test case #%d" % (bytes, self.total_mutant_index))
             self.netmon_results[self.total_mutant_index] = bytes
 
         # check if our fuzz crashed the target. procmon.post_send() returns False if the target access violated.
         if target.procmon and not target.procmon.post_send():
-            self.logger.error("procmon detected access violation on test case #%d" % self.total_mutant_index)
+            self.logger.info("procmon detected access violation on test case #%d" % self.total_mutant_index)
 
             # retrieve the primitive that caused the crash and increment it's individual crash count.
             self.crashing_primitives[self.fuzz_node.mutant] = self.crashing_primitives.get(self.fuzz_node.mutant, 0) + 1
 
             # notify with as much information as possible.
-            if not self.fuzz_node.mutant.name: msg = "primitive lacks a name, "
-            else:                              msg = "primitive name: %s, " % self.fuzz_node.mutant.name
+            if self.fuzz_node.mutant.name:
+                msg = "primitive name: %s, " % self.fuzz_node.mutant.name
+            else:
+                msg = "primitive lacks a name, "
 
             msg += "type: %s, default value: %s" % (self.fuzz_node.mutant.s_type, self.fuzz_node.mutant.original_value)
-            self.logger.error(msg)
+            self.logger.info(msg)
 
             # print crash synopsis
             self.procmon_results[self.total_mutant_index] = target.procmon.get_crash_synopsis()
-            self.logger.error(self.procmon_results[self.total_mutant_index].split("\n")[0])
+            self.logger.info(self.procmon_results[self.total_mutant_index].split("\n")[0])
 
             # if the user-supplied crash threshold is reached, exhaust this node.
             if self.crashing_primitives[self.fuzz_node.mutant] >= self.crash_threshold:
@@ -699,7 +703,7 @@ class session (pgraph.graph):
                 try:
                     self.thread.join()
                 except:
-                    self.logger.debug( "No server launched")
+                    self.logger.debug("No server launched")
                 sys.exit(0)
 
 
@@ -775,7 +779,7 @@ class session (pgraph.graph):
         else:
             self.logger.error("no vmcontrol or procmon channel available ... sleeping for %d seconds" % self.restart_sleep_time)
             time.sleep(self.restart_sleep_time)
-            # XXX : should be good to relaunch test for crash before returning False
+            # TODO: should be good to relaunch test for crash before returning False
             return False
 
         # pass specified target parameters to the PED-RPC server to re-establish connections.
@@ -793,8 +797,8 @@ class session (pgraph.graph):
 
         # web interface thread doesn't catch KeyboardInterrupt
         # add a signal handler, and exit on SIGINT
-        # XXX - should wait for the end of the ongoing test case, and stop gracefully netmon and procmon
-        #     - doesn't work on OS where the signal module isn't available
+        # TODO: should wait for the end of the ongoing test case, and stop gracefully netmon and procmon
+        # TODO: doesn't work on OS where the signal module isn't available
         try:
             import signal
             self.signal_module = True
@@ -839,17 +843,18 @@ class session (pgraph.graph):
         if edge.callback:
             data = edge.callback(self, node, edge, sock)
 
-        self.logger.error("xmitting: [%d.%d]" % (node.id, self.total_mutant_index))
+        self.logger.info("xmitting: [%d.%d]" % (node.id, self.total_mutant_index))
 
         # if no data was returned by the callback, render the node here.
         if not data:
             data = node.render()
 
         # if data length is > 65507 and proto is UDP, truncate it.
-        # XXX - this logic does not prevent duplicate test cases, need to address this in the future.
+        # TODO: this logic does not prevent duplicate test cases, need to address this in the future.
         if self.proto == socket.SOCK_DGRAM:
             # max UDP packet size.
-            # XXX - anyone know how to determine this value smarter?
+            # TODO: anyone know how to determine this value smarter?
+            # - See http://stackoverflow.com/questions/25841/maximum-buffer-length-for-sendto to fix this
             MAX_UDP = 65507
 
             if os.name != "nt" and os.uname()[0] == "Darwin":
@@ -869,7 +874,7 @@ class session (pgraph.graph):
             self.logger.error("Socket error, send: %s" % inst)
 
         if self.proto == (socket.SOCK_STREAM or socket.SOCK_DGRAM):
-            # XXX - might have a need to increase this at some point. (possibly make it a class parameter)
+            # TODO: might have a need to increase this at some point. (possibly make it a class parameter)
             try:
                 self.last_recv = sock.recv(10000)
             except Exception, e:
